@@ -5,25 +5,70 @@
 
 import { Platform } from 'react-native';
 
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
+/* Colores principales del design system */
+const primary = '#55AD9B';
+const secondary = '#95D2B3';
+const backgroundLight = '#F1F8E8';
+const accent = '#D8EFD3';
+
+/* Dark mode equivalente */
+const darkBackground = '#0F1A17';
+const darkCard = '#1B2A26';
 
 export const Colors = {
   light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
+    text: '#1E2A28',
+
+    /* fondo general app */
+    background: backgroundLight,
+
+    /* color principal botones */
+    primary: primary,
+
+    /* botones secundarios */
+    secondary: secondary,
+
+    /* tarjetas y bloques */
+    card: accent,
+
+    /* color iconos */
+    icon: '#5A6B68',
+
+    /* tabs */
+    tabIconDefault: '#8FA9A3',
+    tabIconSelected: primary,
+
+    /* estados */
+    success: '#4CAF50',
+    warning: '#F4A261',
+    error: '#E76F51',
+
+    /* inputs */
+    border: '#D8EFD3',
+    inputBackground: '#FFFFFF',
   },
+
   dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
+    text: '#F1F5F4',
+
+    background: darkBackground,
+
+    primary: primary,
+    secondary: secondary,
+
+    card: darkCard,
+
+    icon: '#B6C7C3',
+
+    tabIconDefault: '#6F8781',
+    tabIconSelected: primary,
+
+    success: '#6BD18B',
+    warning: '#F7B267',
+    error: '#FF7A7A',
+
+    border: '#2F4742',
+    inputBackground: '#1F2F2B',
   },
 };
 
