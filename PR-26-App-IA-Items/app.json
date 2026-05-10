@@ -46,7 +46,8 @@
         {
           "color": "#55AD9B"
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,
@@ -55,7 +56,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "7dd212d3-cde7-4127-80fc-3964c677d978"
+        "projectId": "c53a2005-a321-4ac9-a9d6-b83cd27d039a"
       }
     }
   }

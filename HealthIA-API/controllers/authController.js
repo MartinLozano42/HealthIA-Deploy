@@ -48,7 +48,7 @@ const buildResetUrl = (token) => {
   return `${rawBaseUrl}${separator}token=${encodeURIComponent(token)}`;
 };
 
-const sendPasswordResetEmail = async ({ to, resetUrl }) => {
+const createTransporter = () => {
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER;
@@ -61,14 +61,20 @@ const sendPasswordResetEmail = async ({ to, resetUrl }) => {
     );
   }
 
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    requireTLS: port === 587,
-    auth: { user, pass },
-  });
+  return {
+    transporter: nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      requireTLS: port === 587,
+      auth: { user, pass },
+    }),
+    from,
+  };
+};
 
+const sendPasswordResetCodeEmail = async ({ to, code }) => {
+  const { transporter, from } = createTransporter();
   await transporter.verify();
 
   const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
@@ -78,9 +84,8 @@ const sendPasswordResetEmail = async ({ to, resetUrl }) => {
     "Hola,",
     "",
     `Recibimos una solicitud para restablecer tu contrasena en ${safeAppName}.`,
-    `Este enlace vence en ${PASSWORD_RESET_WINDOW_MINUTES} minutos.`,
-    "",
-    `Restablecer contrasena: ${resetUrl}`,
+    `Tu codigo de verificacion es: ${code}`,
+    `Este codigo vence en ${PASSWORD_RESET_WINDOW_MINUTES} minutos.`,
     "",
     "Si no solicitaste este cambio, puedes ignorar este correo.",
   ].join("\n");
@@ -99,23 +104,18 @@ const sendPasswordResetEmail = async ({ to, resetUrl }) => {
           <p style="margin:0 0 16px 0;font-size:16px;line-height:1.55;">
             Hola, recibimos una solicitud para restablecer tu contrasena en <strong>${safeAppName}</strong>.
           </p>
-          <p style="margin:0 0 22px 0;font-size:14px;line-height:1.5;color:#4b5563;">
-            Por seguridad, este enlace vence en <strong>${PASSWORD_RESET_WINDOW_MINUTES} minutos</strong>.
+          <p style="margin:0 0 16px 0;font-size:14px;line-height:1.5;color:#4b5563;">
+            Ingresa el siguiente codigo en la aplicacion para continuar:
           </p>
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 18px auto;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 20px auto;">
             <tr>
-              <td align="center" style="border-radius:10px;background:${MAIL_PRIMARY_COLOR};">
-                <a href="${resetUrl}" style="display:inline-block;padding:13px 22px;font-size:16px;font-weight:700;color:#ffffff;text-decoration:none;">
-                  Restablecer contrasena
-                </a>
+              <td align="center" style="background:#f0faf7;border:2px solid ${MAIL_PRIMARY_COLOR};border-radius:14px;padding:18px 32px;">
+                <span style="font-size:38px;font-weight:800;color:${MAIL_PRIMARY_COLOR};letter-spacing:10px;">${code}</span>
               </td>
             </tr>
           </table>
-          <p style="margin:0 0 10px 0;font-size:13px;line-height:1.5;color:#6b7280;">
-            Si el boton no funciona, copia y pega este enlace en tu navegador:
-          </p>
-          <p style="margin:0 0 18px 0;font-size:12px;line-height:1.5;word-break:break-all;">
-            <a href="${resetUrl}" style="color:${MAIL_PRIMARY_COLOR};text-decoration:underline;">${resetUrl}</a>
+          <p style="margin:0 0 22px 0;font-size:13px;line-height:1.5;color:#6b7280;text-align:center;">
+            Este codigo vence en <strong>${PASSWORD_RESET_WINDOW_MINUTES} minutos</strong>.
           </p>
           <p style="margin:0;font-size:13px;line-height:1.5;color:#6b7280;">
             Si no solicitaste este cambio, puedes ignorar este correo.
@@ -133,7 +133,7 @@ const sendPasswordResetEmail = async ({ to, resetUrl }) => {
   const info = await transporter.sendMail({
     from: `"${safeAppName}" <${from}>`,
     to,
-    subject: `Recuperacion de contrasena - ${safeAppName}`,
+    subject: `Codigo de verificacion - ${safeAppName}`,
     text: plainText,
     html,
   });
@@ -383,22 +383,18 @@ export const forgotPassword = async (req, res) => {
     }
 
     const user = users[0];
-    const token = crypto.randomBytes(32).toString("hex");
-    const tokenHash = hashResetToken(token);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = hashResetToken(code);
     const expiresAt = new Date(
       Date.now() + PASSWORD_RESET_WINDOW_MINUTES * 60 * 1000
     );
 
     await pool.query(
-      `
-      INSERT INTO password_reset_tokens (idUser, tokenHash, expiresAt)
-      VALUES (?, ?, ?)
-      `,
-      [user.id, tokenHash, expiresAt]
+      `INSERT INTO password_reset_tokens (idUser, tokenHash, expiresAt) VALUES (?, ?, ?)`,
+      [user.id, codeHash, expiresAt]
     );
 
-    const resetUrl = buildResetUrl(token);
-    await sendPasswordResetEmail({ to: user.email, resetUrl });
+    await sendPasswordResetCodeEmail({ to: user.email, code });
 
     return res.status(200).json(getPasswordResetGenericResponse());
   } catch (error) {
@@ -406,6 +402,70 @@ export const forgotPassword = async (req, res) => {
     return res.status(500).json({
       message: "No se pudo procesar la solicitud",
     });
+  }
+};
+
+export const verifyCode = async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const code = String(req.body?.code || "").trim();
+
+    if (!email || !code) {
+      return res.status(400).json({ message: "Correo y codigo son obligatorios" });
+    }
+
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ message: "Codigo invalido" });
+    }
+
+    await ensurePasswordResetTable();
+
+    const [users] = await pool.query(
+      "SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1",
+      [email]
+    );
+
+    if (users.length === 0) {
+      return res.status(400).json({ message: "Codigo invalido o expirado" });
+    }
+
+    const user = users[0];
+    const codeHash = hashResetToken(code);
+
+    const [rows] = await pool.query(
+      `SELECT id, expiresAt, usedAt
+       FROM password_reset_tokens
+       WHERE idUser = ? AND tokenHash = ?
+       ORDER BY createdAt DESC LIMIT 1`,
+      [user.id, codeHash]
+    );
+
+    if (rows.length === 0) {
+      return res.status(400).json({ message: "Codigo invalido o expirado" });
+    }
+
+    const record = rows[0];
+
+    if (record.usedAt) {
+      return res.status(400).json({ message: "El codigo ya fue utilizado" });
+    }
+
+    if (new Date(record.expiresAt).getTime() < Date.now()) {
+      return res.status(400).json({ message: "El codigo ha expirado" });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenHash = hashResetToken(resetToken);
+
+    await pool.query(
+      "UPDATE password_reset_tokens SET tokenHash = ? WHERE id = ?",
+      [resetTokenHash, record.id]
+    );
+
+    return res.status(200).json({ token: resetToken });
+  } catch (error) {
+    console.error("verifyCode error:", error);
+    return res.status(500).json({ message: "No se pudo verificar el codigo" });
   }
 };
 
