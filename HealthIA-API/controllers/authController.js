@@ -1,6 +1,5 @@
 import pool from "../db/connection.js";
 import crypto from "crypto";
-import { Resend } from "resend";
 
 const PASSWORD_RESET_WINDOW_MINUTES = Number(
   process.env.PASSWORD_RESET_WINDOW_MINUTES || 30
@@ -9,10 +8,9 @@ const PASSWORD_RESET_WINDOW_MINUTES = Number(
 const MAIL_APP_NAME = process.env.MAIL_APP_NAME || "HealthIA";
 const MAIL_PRIMARY_COLOR = process.env.MAIL_PRIMARY_COLOR || "#0b6b57";
 
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_FROM = process.env.RESEND_FROM || `HealthIA <onboarding@resend.dev>`;
-
-const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL;
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || MAIL_APP_NAME;
 
 let passwordResetTableEnsured = false;
 
@@ -49,6 +47,7 @@ const hashResetToken = (token) =>
 
 const sanitizeUser = (user) => {
   if (!user) return null;
+
   const { password, ...safeUser } = user;
   return safeUser;
 };
@@ -79,6 +78,7 @@ const validateName = (name) => {
   }
 
   const nameRegex = /^[A-Za-zÁÉÍÓÚáéíóúÑñÜü\s]+$/;
+
   if (!nameRegex.test(cleanName)) {
     throw new Error("El nombre solo puede contener letras y espacios");
   }
@@ -98,6 +98,7 @@ const validateEmail = (email) => {
   }
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
   if (!emailRegex.test(cleanEmail)) {
     throw new Error("Correo invalido");
   }
@@ -166,15 +167,21 @@ const buildPasswordResetEmail = ({ code }) => {
           <h1 style="margin:0;font-size:30px;line-height:1.2;color:#ffffff;font-weight:700;">${safeAppName}</h1>
         </td>
       </tr>
+
       <tr>
         <td style="padding:26px 24px 8px 24px;">
-          <p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:#111827;">Recuperacion de contrasena</p>
+          <p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:#111827;">
+            Recuperacion de contrasena
+          </p>
+
           <p style="margin:0 0 16px 0;font-size:16px;line-height:1.55;">
             Hola, recibimos una solicitud para restablecer tu contrasena en <strong>${safeAppName}</strong>.
           </p>
+
           <p style="margin:0 0 16px 0;font-size:14px;line-height:1.5;color:#4b5563;">
             Ingresa el siguiente codigo en la aplicacion para continuar:
           </p>
+
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 20px auto;">
             <tr>
               <td align="center" style="background:#f0faf7;border:2px solid ${safeColor};border-radius:14px;padding:18px 32px;">
@@ -182,14 +189,17 @@ const buildPasswordResetEmail = ({ code }) => {
               </td>
             </tr>
           </table>
+
           <p style="margin:0 0 22px 0;font-size:13px;line-height:1.5;color:#6b7280;text-align:center;">
             Este codigo vence en <strong>${PASSWORD_RESET_WINDOW_MINUTES} minutos</strong>.
           </p>
+
           <p style="margin:0;font-size:13px;line-height:1.5;color:#6b7280;">
             Si no solicitaste este cambio, puedes ignorar este correo.
           </p>
         </td>
       </tr>
+
       <tr>
         <td style="padding:16px 24px;background:#111827;color:#d1d5db;text-align:center;font-size:12px;">
           © ${currentYear} ${safeAppName}. Todos los derechos reservados.
@@ -198,81 +208,120 @@ const buildPasswordResetEmail = ({ code }) => {
     </table>
   </div>`;
 
-  return { safeAppName, plainText, html };
+  return {
+    safeAppName,
+    plainText,
+    html,
+  };
+};
+
+const sendEmailWithBrevo = async ({ to, subject, text, html }) => {
+  if (!BREVO_API_KEY) {
+    throw new Error("Falta BREVO_API_KEY en las variables de entorno");
+  }
+
+  if (!BREVO_SENDER_EMAIL) {
+    throw new Error("Falta BREVO_SENDER_EMAIL en las variables de entorno");
+  }
+
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "api-key": BREVO_API_KEY,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      sender: {
+        name: BREVO_SENDER_NAME,
+        email: BREVO_SENDER_EMAIL,
+      },
+      to: [
+        {
+          email: to,
+        },
+      ],
+      subject,
+      textContent: text,
+      htmlContent: html,
+    }),
+  });
+
+  const rawText = await response.text();
+
+  let data = null;
+
+  try {
+    data = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    data = rawText;
+  }
+
+  if (!response.ok) {
+    console.error("Brevo error:", data);
+
+    const message =
+      data?.message ||
+      data?.error ||
+      rawText ||
+      `Brevo respondio con estado ${response.status}`;
+
+    throw new Error(message);
+  }
+
+  return data;
 };
 
 const sendPasswordResetCodeEmail = async ({ to, code }) => {
-  if (!resend) {
-    throw new Error("RESEND_API_KEY no esta configurado");
-  }
-
   const { safeAppName, plainText, html } = buildPasswordResetEmail({ code });
 
-  const result = await resend.emails.send({
-    from: RESEND_FROM,
+  const data = await sendEmailWithBrevo({
     to,
     subject: `Codigo de verificacion - ${safeAppName}`,
     text: plainText,
     html,
   });
 
-  if (result.error) {
-    console.error("Resend error:", result.error);
-    throw new Error(result.error.message || "No se pudo enviar el correo");
-  }
+  console.log("Correo enviado con Brevo:", data?.messageId || data);
 
-  console.log("Correo enviado con Resend:", result.data?.id);
-  return result.data;
+  return data;
 };
 
 export const testMail = async (req, res) => {
   try {
-    if (!resend) {
-      return res.status(500).json({
-        message: "Falta configurar RESEND_API_KEY en Render",
-      });
-    }
-
     const to = String(req.body?.to || "").trim().toLowerCase();
 
     if (!to) {
       return res.status(400).json({
-        message: "Debes enviar un correo destino en el body: { to: 'correo@gmail.com' }",
+        message:
+          "Debes enviar un correo destino en el body: { to: 'correo@gmail.com' }",
       });
     }
 
     const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
 
-    const result = await resend.emails.send({
-      from: RESEND_FROM,
+    const data = await sendEmailWithBrevo({
       to,
       subject: `Prueba de correo - ${safeAppName}`,
-      text: "Si recibes este correo, Resend esta funcionando correctamente.",
+      text: "Si recibes este correo, Brevo esta funcionando correctamente.",
       html: `
         <div style="font-family:Arial,Helvetica,sans-serif;padding:20px;">
           <h2>${safeAppName}</h2>
-          <p>Si recibes este correo, <strong>Resend esta funcionando correctamente</strong>.</p>
+          <p>Si recibes este correo, <strong>Brevo esta funcionando correctamente</strong>.</p>
         </div>
       `,
     });
 
-    if (result.error) {
-      console.error("testMail Resend error:", result.error);
-      return res.status(500).json({
-        message: "Fallo Resend",
-        error: result.error.message || result.error,
-      });
-    }
-
     return res.status(200).json({
-      message: "Correo de prueba enviado con Resend",
-      provider: "resend",
-      id: result.data?.id,
+      message: "Correo de prueba enviado con Brevo",
+      provider: "brevo",
+      data,
     });
   } catch (error) {
     console.error("testMail error:", error);
+
     return res.status(500).json({
-      message: "Fallo Resend",
+      message: "Fallo Brevo",
       error: String(error && error.message ? error.message : error),
     });
   }
@@ -315,6 +364,7 @@ export const register = async (req, res) => {
     });
   } catch (error) {
     console.error("register error:", error);
+
     return res.status(400).json({
       message: error instanceof Error ? error.message : "Error al registrar",
     });
@@ -338,7 +388,9 @@ export const login = async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(401).json({ message: "Credenciales incorrectas" });
+      return res.status(401).json({
+        message: "Credenciales incorrectas",
+      });
     }
 
     return res.json({
@@ -346,7 +398,10 @@ export const login = async (req, res) => {
     });
   } catch (error) {
     console.error("login error:", error);
-    return res.status(500).json({ message: "Error en login" });
+
+    return res.status(500).json({
+      message: "Error en login",
+    });
   }
 };
 
@@ -372,6 +427,7 @@ export const forgotPassword = async (req, res) => {
     }
 
     const user = users[0];
+
     const code = String(Math.floor(100000 + Math.random() * 900000));
     const codeHash = hashResetToken(code);
     const expiresAt = new Date(
@@ -383,11 +439,15 @@ export const forgotPassword = async (req, res) => {
       [user.id, codeHash, expiresAt]
     );
 
-    await sendPasswordResetCodeEmail({ to: user.email, code });
+    await sendPasswordResetCodeEmail({
+      to: user.email,
+      code,
+    });
 
     return res.status(200).json(getPasswordResetGenericResponse());
   } catch (error) {
     console.error("forgotPassword error:", error);
+
     return res.status(500).json({
       message: "No se pudo procesar la solicitud",
     });
@@ -458,16 +518,17 @@ export const verifyCode = async (req, res) => {
     const resetToken = crypto.randomBytes(32).toString("hex");
     const resetTokenHash = hashResetToken(resetToken);
 
-    await pool.query("UPDATE password_reset_tokens SET tokenHash = ? WHERE id = ?", [
-      resetTokenHash,
-      record.id,
-    ]);
+    await pool.query(
+      "UPDATE password_reset_tokens SET tokenHash = ? WHERE id = ?",
+      [resetTokenHash, record.id]
+    );
 
     return res.status(200).json({
       token: resetToken,
     });
   } catch (error) {
     console.error("verifyCode error:", error);
+
     return res.status(500).json({
       message: "No se pudo verificar el codigo",
     });
@@ -525,15 +586,17 @@ export const resetPassword = async (req, res) => {
       resetRecord.idUser,
     ]);
 
-    await pool.query("UPDATE password_reset_tokens SET usedAt = NOW() WHERE id = ?", [
-      resetRecord.id,
-    ]);
+    await pool.query(
+      "UPDATE password_reset_tokens SET usedAt = NOW() WHERE id = ?",
+      [resetRecord.id]
+    );
 
     return res.status(200).json({
       message: "Contrasena actualizada correctamente",
     });
   } catch (error) {
     console.error("resetPassword error:", error);
+
     return res.status(400).json({
       message:
         error instanceof Error
