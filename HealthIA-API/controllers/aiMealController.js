@@ -344,6 +344,26 @@ export const analyzeMealWithGemini = async (req, res) => {
       ]
     );
 
+    await pool.query(
+      `
+      UPDATE dailylog
+      SET
+        foodKcal      = foodKcal      + ?,
+        proteins      = proteins      + ?,
+        carbohydrates = carbohydrates + ?,
+        fats          = fats          + ?,
+        netKcal       = foodKcal      - burnedKcal
+      WHERE idDailyLog = ?
+      `,
+      [
+        Math.round(geminiResult.estimatedCalories || 0),
+        Math.round(geminiResult.estimatedProteins  || 0),
+        Math.round(geminiResult.estimatedCarbs     || 0),
+        Math.round(geminiResult.estimatedFats      || 0),
+        idDailyLog,
+      ]
+    );
+
     const mealName = geminiResult.detectedMealName || "Comida";
     const mealKcal = Math.round(geminiResult.estimatedCalories || 0);
 
