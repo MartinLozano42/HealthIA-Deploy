@@ -93,7 +93,16 @@ const sanitizeUser = (user) => {
 
 export const getUsers = async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM users");
+    const [rows] = await pool.query(`
+      SELECT u.*,
+        COALESCE(p.mealsCount, 0) AS mealsCount
+      FROM users u
+      LEFT JOIN (
+        SELECT idUser, COUNT(*) AS mealsCount
+        FROM photomeallog
+        GROUP BY idUser
+      ) p ON p.idUser = u.id
+    `);
     res.json(rows);
   } catch (error) {
     console.error("getUsers error:", error);
@@ -232,8 +241,8 @@ export const saveOnboarding = async (req, res) => {
 
     if (statsRows.length === 0) {
       await connection.query(
-        `INSERT INTO UserStats (idUser, weight, height, targetWeight, idActivityLevel)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO UserStats (idUser, weight, height, targetWeight, idActivityLevel, recordDate)
+         VALUES (?, ?, ?, ?, ?, NOW())`,
         [userId, parsedWeight, parsedHeight, parsedTargetWeight, parsedActivityLevelId]
       );
     } else {
@@ -250,6 +259,7 @@ export const saveOnboarding = async (req, res) => {
         ]
       );
     }
+
 
     const [activityRows] = await connection.query(
       "SELECT id FROM useractivityprofile WHERE idUser = ? ORDER BY id DESC LIMIT 1",
@@ -318,6 +328,23 @@ export const saveOnboarding = async (req, res) => {
 
     await connection.commit();
     transactionStarted = false;
+
+    // Historial de peso
+    console.log("[WeaklyStats] intentando guardar para idUser:", userId);
+    try {
+      await pool.query(
+        `INSERT INTO WeaklyStats (idUser, idUserStats, weight, height, targetWeight, recordDate)
+         SELECT idUser, id, weight, height, targetWeight, NOW()
+         FROM UserStats
+         WHERE idUser = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [userId]
+      );
+      console.log("[WeaklyStats] OK");
+    } catch (err) {
+      console.error("[WeaklyStats] error:", err.message);
+    }
 
     const [userRows] = await connection.query(
       "SELECT * FROM users WHERE id = ? LIMIT 1",
