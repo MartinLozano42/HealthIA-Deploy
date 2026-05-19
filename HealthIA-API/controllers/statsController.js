@@ -103,24 +103,85 @@ const safePercent = (value, total) => {
   return Math.round((value / total) * 100);
 };
 
-const getLatestGoal = async (idUser) => {
-  const [[latestDailyLog]] = await pool.query(
-    `
-    SELECT dailyKcalObjetive, proteinObjetive, carbTarget, fatTarget
-    FROM dailylog
-    WHERE idUser = ?
-    ORDER BY logDate DESC
-    LIMIT 1
-    `,
-    [idUser]
+const calcTDEE = (weight, heightMeters, ageYears, sex, activityFactor) => {
+  const h = heightMeters * 100; // a cm
+  const isFemale = ["femenino", "female", "f", "mujer"].includes(
+    String(sex || "").trim().toLowerCase()
   );
 
-  return {
-    dailyCalories: round(latestDailyLog?.dailyKcalObjetive || 2000),
-    protein: round(latestDailyLog?.proteinObjetive || 130),
-    carbs: round(latestDailyLog?.carbTarget || 250),
-    fat: round(latestDailyLog?.fatTarget || 65),
-  };
+  const bmr = isFemale
+    ? 447.593 + 9.247 * weight + 3.098 * h - 4.33 * ageYears
+    : 88.362 + 13.397 * weight + 4.799 * h - 5.677 * ageYears;
+
+  return Math.max(1200, Math.round(bmr * (activityFactor || 1.2)));
+};
+
+const getLatestGoal = async (idUser) => {
+  try {
+    const [[stats]] = await pool.query(
+      `SELECT weight, height, idActivityLevel
+       FROM UserStats
+       WHERE idUser = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [idUser]
+    );
+
+    const weight = normalizeNumber(stats?.weight, 0);
+    const height = normalizeNumber(stats?.height, 0);
+
+    if (weight <= 0 || height <= 0) {
+      return { dailyCalories: 2000, protein: 130, carbs: 250, fat: 65 };
+    }
+
+    let activityFactor = 1.2;
+    if (stats?.idActivityLevel) {
+      const [[al]] = await pool.query(
+        `SELECT activityFactor FROM activitylevels WHERE idActivityLevel = ? LIMIT 1`,
+        [stats.idActivityLevel]
+      );
+      activityFactor = normalizeNumber(al?.activityFactor, 1.2);
+    }
+
+    let age = 30;
+    let sex = "masculino";
+    try {
+      const [[pref]] = await pool.query(
+        `SELECT birthDate, sex FROM user_onboarding_preferences WHERE idUser = ? LIMIT 1`,
+        [idUser]
+      );
+      if (pref?.birthDate) {
+        age = Math.floor(
+          (Date.now() - new Date(pref.birthDate).getTime()) /
+            (1000 * 60 * 60 * 24 * 365.25)
+        );
+      }
+      if (pref?.sex) sex = pref.sex;
+    } catch {
+      // tabla no existe aún, usa defaults
+    }
+
+    const tdee    = calcTDEE(weight, height, age, sex, activityFactor);
+    const protein = Math.max(50, Math.round(weight * 1.8));
+    const fat     = Math.max(30, Math.round((tdee * 0.25) / 9));
+    const carbs   = Math.max(50, Math.round((tdee - protein * 4 - fat * 9) / 4));
+
+    const today = toMysqlDate(new Date());
+    pool.query(
+      `INSERT INTO dailylog (idUser, logDate, dailyKcalObjetive, proteinObjetive, carbTarget, fatTarget)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         dailyKcalObjetive = VALUES(dailyKcalObjetive),
+         proteinObjetive   = VALUES(proteinObjetive),
+         carbTarget        = VALUES(carbTarget),
+         fatTarget         = VALUES(fatTarget)`,
+      [idUser, today, tdee, protein, carbs, fat]
+    ).catch(() => {});
+
+    return { dailyCalories: tdee, protein, carbs, fat };
+  } catch {
+    return { dailyCalories: 2000, protein: 130, carbs: 250, fat: 65 };
+  }
 };
 
 const calculateStreak = ({ dates, mealMap, logMap }) => {
@@ -218,9 +279,9 @@ export const saveStats = async (req, res) => {
     const { idUser, weight, height, targetWeight, idActivityLevel } = req.body;
 
     const [result] = await pool.query(
-      `INSERT INTO UserStats 
-      (idUser, weight, height, targetWeight, idActivityLevel) 
-      VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO UserStats
+      (idUser, weight, height, targetWeight, idActivityLevel, recordDate)
+      VALUES (?, ?, ?, ?, ?, NOW())`,
       [idUser, weight, height, targetWeight, idActivityLevel || null]
     );
 
@@ -312,21 +373,20 @@ export const getUserProgressStats = async (req, res) => {
     const [weightRowsRaw] = await pool.query(
       `
       SELECT
-        DATE_FORMAT(recordDate, '%Y-%m-%d') AS recordDate,
-        weight,
-        height,
-        targetWeight
-      FROM UserStats
-      WHERE idUser = ?
-        AND DATE(recordDate) <= ?
-      ORDER BY recordDate DESC
+        DATE_FORMAT(ws.recordDate, '%Y-%m-%d') AS recordDate,
+        ws.weight,
+        ws.height,
+        ws.targetWeight
+      FROM WeaklyStats ws
+      WHERE ws.idUser = ?
+        AND DATE(ws.recordDate) <= ?
+      ORDER BY ws.recordDate ASC
       LIMIT 12
       `,
       [idUser, endDate]
     );
 
     const weightEvolution = weightRowsRaw
-      .reverse()
       .map((row, index) => ({
         label: range === "month" ? `R${index + 1}` : `P${index + 1}`,
         date: row.recordDate,
@@ -458,6 +518,41 @@ export const getUserProgressStats = async (req, res) => {
   }
 };
 
+export const saveUserGoal = async (req, res) => {
+  try {
+    const idUser = Number(req.params.idUser || 0);
+    const dailyCalories = Math.round(Number(req.body.dailyCalories || 0));
+    const protein      = Math.round(Number(req.body.protein      || 0));
+    const carbs        = Math.round(Number(req.body.carbs        || 0));
+    const fat          = Math.round(Number(req.body.fat          || 0));
+
+    if (!Number.isInteger(idUser) || idUser <= 0) {
+      return res.status(400).json({ message: "idUser inválido" });
+    }
+    if (dailyCalories < 500 || dailyCalories > 10000) {
+      return res.status(400).json({ message: "dailyCalories debe estar entre 500 y 10000" });
+    }
+
+    const today = toMysqlDate(new Date());
+
+    await pool.query(
+      `INSERT INTO dailylog (idUser, logDate, dailyKcalObjetive, proteinObjetive, carbTarget, fatTarget)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         dailyKcalObjetive = VALUES(dailyKcalObjetive),
+         proteinObjetive   = VALUES(proteinObjetive),
+         carbTarget        = VALUES(carbTarget),
+         fatTarget         = VALUES(fatTarget)`,
+      [idUser, today, dailyCalories, protein || null, carbs || null, fat || null]
+    );
+
+    return res.json({ message: "Meta guardada", dailyCalories, protein, carbs, fat });
+  } catch (error) {
+    console.error("saveUserGoal error:", error);
+    return res.status(500).json({ message: "No se pudo guardar la meta", error: String(error?.message || error) });
+  }
+};
+
 export const getAdminSummary = async (req, res) => {
   try {
     const [[usersSummary]] = await pool.query(`
@@ -470,7 +565,7 @@ export const getAdminSummary = async (req, res) => {
 
     const [[mealsSummary]] = await pool.query(`
       SELECT COUNT(*) AS registeredMeals
-      FROM Meal
+      FROM photomeallog
     `);
 
     const [mealTrendRows] = await pool.query(`
