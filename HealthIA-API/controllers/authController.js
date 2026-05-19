@@ -1,13 +1,18 @@
 import pool from "../db/connection.js";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 import { Resend } from "resend";
 
 const PASSWORD_RESET_WINDOW_MINUTES = Number(
   process.env.PASSWORD_RESET_WINDOW_MINUTES || 30
 );
+
 const MAIL_APP_NAME = process.env.MAIL_APP_NAME || "HealthIA";
 const MAIL_PRIMARY_COLOR = process.env.MAIL_PRIMARY_COLOR || "#0b6b57";
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || `HealthIA <onboarding@resend.dev>`;
+
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 let passwordResetTableEnsured = false;
 
@@ -37,114 +42,6 @@ const ensurePasswordResetTable = async () => {
   `);
 
   passwordResetTableEnsured = true;
-};
-
-const buildResetUrl = (token) => {
-  const rawBaseUrl =
-    process.env.RESET_PASSWORD_URL || process.env.FRONTEND_URL || "";
-
-  if (!rawBaseUrl) return `token=${token}`;
-
-  const separator = rawBaseUrl.includes("?") ? "&" : "?";
-  return `${rawBaseUrl}${separator}token=${encodeURIComponent(token)}`;
-};
-
-const createTransporter = () => {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = process.env.SMTP_USER;
-  const pass = String(process.env.SMTP_PASS || "").replace(/\s+/g, "");
-  const from = process.env.SMTP_FROM || user;
-
-  if (!host || !user || !pass || !from) {
-    throw new Error(
-      "SMTP incompleto: faltan SMTP_HOST, SMTP_USER, SMTP_PASS o SMTP_FROM"
-    );
-  }
-
-  return {
-    transporter: nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      requireTLS: port === 587,
-      auth: { user, pass },
-    }),
-    from,
-  };
-};
-
-const buildEmailHtml = (code) => {
-  const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
-  const currentYear = new Date().getFullYear();
-  return `
-  <div style="margin:0;padding:24px 12px;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
-      <tr>
-        <td style="background:${MAIL_PRIMARY_COLOR};padding:22px 24px;text-align:center;">
-          <h1 style="margin:0;font-size:30px;line-height:1.2;color:#ffffff;font-weight:700;">${safeAppName}</h1>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:26px 24px 8px 24px;">
-          <p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:#111827;">Recuperacion de contrasena</p>
-          <p style="margin:0 0 16px 0;font-size:16px;line-height:1.55;">
-            Hola, recibimos una solicitud para restablecer tu contrasena en <strong>${safeAppName}</strong>.
-          </p>
-          <p style="margin:0 0 16px 0;font-size:14px;line-height:1.5;color:#4b5563;">
-            Ingresa el siguiente codigo en la aplicacion para continuar:
-          </p>
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 20px auto;">
-            <tr>
-              <td align="center" style="background:#f0faf7;border:2px solid ${MAIL_PRIMARY_COLOR};border-radius:14px;padding:18px 32px;">
-                <span style="font-size:38px;font-weight:800;color:${MAIL_PRIMARY_COLOR};letter-spacing:10px;">${code}</span>
-              </td>
-            </tr>
-          </table>
-          <p style="margin:0 0 22px 0;font-size:13px;line-height:1.5;color:#6b7280;text-align:center;">
-            Este codigo vence en <strong>${PASSWORD_RESET_WINDOW_MINUTES} minutos</strong>.
-          </p>
-          <p style="margin:0;font-size:13px;line-height:1.5;color:#6b7280;">
-            Si no solicitaste este cambio, puedes ignorar este correo.
-          </p>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:16px 24px;background:#111827;color:#d1d5db;text-align:center;font-size:12px;">
-          © ${currentYear} ${safeAppName}. Todos los derechos reservados.
-        </td>
-      </tr>
-    </table>
-  </div>`;
-};
-
-const sendPasswordResetCodeEmail = async ({ to, code }) => {
-  const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
-  const subject = `Codigo de verificacion - ${safeAppName}`;
-  const html = buildEmailHtml(code);
-  const plainText = [
-    "Hola,",
-    "",
-    `Recibimos una solicitud para restablecer tu contrasena en ${safeAppName}.`,
-    `Tu codigo de verificacion es: ${code}`,
-    `Este codigo vence en ${PASSWORD_RESET_WINDOW_MINUTES} minutos.`,
-    "",
-    "Si no solicitaste este cambio, puedes ignorar este correo.",
-  ].join("\n");
-
-  if (process.env.RESEND_API_KEY) {
-    const resend = new Resend(process.env.RESEND_API_KEY);
-    const from = process.env.RESEND_FROM || "onboarding@resend.dev";
-    const { error } = await resend.emails.send({ from: `"${safeAppName}" <${from}>`, to, subject, html, text: plainText });
-    if (error) throw new Error(`Resend error: ${error.message}`);
-    console.log("Correo enviado via Resend a:", to);
-    return;
-  }
-
-  const { transporter, from } = createTransporter();
-  await transporter.verify();
-  const info = await transporter.sendMail({ from: `"${safeAppName}" <${from}>`, to, subject, text: plainText, html });
-  console.log("Correo enviado via SMTP:", info.messageId);
 };
 
 const hashResetToken = (token) =>
@@ -246,50 +143,136 @@ const validatePassword = (password) => {
   return cleanPassword;
 };
 
+const buildPasswordResetEmail = ({ code }) => {
+  const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
+  const safeColor = String(MAIL_PRIMARY_COLOR || "#0b6b57").replace(/[<>]/g, "");
+  const currentYear = new Date().getFullYear();
+
+  const plainText = [
+    "Hola,",
+    "",
+    `Recibimos una solicitud para restablecer tu contrasena en ${safeAppName}.`,
+    `Tu codigo de verificacion es: ${code}`,
+    `Este codigo vence en ${PASSWORD_RESET_WINDOW_MINUTES} minutos.`,
+    "",
+    "Si no solicitaste este cambio, puedes ignorar este correo.",
+  ].join("\n");
+
+  const html = `
+  <div style="margin:0;padding:24px 12px;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
+      <tr>
+        <td style="background:${safeColor};padding:22px 24px;text-align:center;">
+          <h1 style="margin:0;font-size:30px;line-height:1.2;color:#ffffff;font-weight:700;">${safeAppName}</h1>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:26px 24px 8px 24px;">
+          <p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:#111827;">Recuperacion de contrasena</p>
+          <p style="margin:0 0 16px 0;font-size:16px;line-height:1.55;">
+            Hola, recibimos una solicitud para restablecer tu contrasena en <strong>${safeAppName}</strong>.
+          </p>
+          <p style="margin:0 0 16px 0;font-size:14px;line-height:1.5;color:#4b5563;">
+            Ingresa el siguiente codigo en la aplicacion para continuar:
+          </p>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 20px auto;">
+            <tr>
+              <td align="center" style="background:#f0faf7;border:2px solid ${safeColor};border-radius:14px;padding:18px 32px;">
+                <span style="font-size:38px;font-weight:800;color:${safeColor};letter-spacing:10px;">${code}</span>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:0 0 22px 0;font-size:13px;line-height:1.5;color:#6b7280;text-align:center;">
+            Este codigo vence en <strong>${PASSWORD_RESET_WINDOW_MINUTES} minutos</strong>.
+          </p>
+          <p style="margin:0;font-size:13px;line-height:1.5;color:#6b7280;">
+            Si no solicitaste este cambio, puedes ignorar este correo.
+          </p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:16px 24px;background:#111827;color:#d1d5db;text-align:center;font-size:12px;">
+          © ${currentYear} ${safeAppName}. Todos los derechos reservados.
+        </td>
+      </tr>
+    </table>
+  </div>`;
+
+  return { safeAppName, plainText, html };
+};
+
+const sendPasswordResetCodeEmail = async ({ to, code }) => {
+  if (!resend) {
+    throw new Error("RESEND_API_KEY no esta configurado");
+  }
+
+  const { safeAppName, plainText, html } = buildPasswordResetEmail({ code });
+
+  const result = await resend.emails.send({
+    from: RESEND_FROM,
+    to,
+    subject: `Codigo de verificacion - ${safeAppName}`,
+    text: plainText,
+    html,
+  });
+
+  if (result.error) {
+    console.error("Resend error:", result.error);
+    throw new Error(result.error.message || "No se pudo enviar el correo");
+  }
+
+  console.log("Correo enviado con Resend:", result.data?.id);
+  return result.data;
+};
+
 export const testMail = async (req, res) => {
   try {
-    const host = process.env.SMTP_HOST;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const user = process.env.SMTP_USER;
-    const pass = String(process.env.SMTP_PASS || "").replace(/\s+/g, "");
-    const from = process.env.SMTP_FROM || user;
-    const to = req.body?.to || user;
-
-    if (!host || !user || !pass || !from) {
+    if (!resend) {
       return res.status(500).json({
-        message: "Faltan variables SMTP_HOST, SMTP_USER, SMTP_PASS o SMTP_FROM",
+        message: "Falta configurar RESEND_API_KEY en Render",
       });
     }
 
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      requireTLS: port === 587,
-      auth: {
-        user,
-        pass,
-      },
-    });
+    const to = String(req.body?.to || "").trim().toLowerCase();
 
-    await transporter.verify();
+    if (!to) {
+      return res.status(400).json({
+        message: "Debes enviar un correo destino en el body: { to: 'correo@gmail.com' }",
+      });
+    }
 
-    const info = await transporter.sendMail({
-      from: `HealthIA <${from}>`,
+    const safeAppName = String(MAIL_APP_NAME).replace(/[<>]/g, "");
+
+    const result = await resend.emails.send({
+      from: RESEND_FROM,
       to,
-      subject: "Prueba SMTP HealthIA",
-      text: "Si recibes este correo, SMTP esta funcionando.",
-      html: "<p>Si recibes este correo, <b>SMTP esta funcionando</b>.</p>",
+      subject: `Prueba de correo - ${safeAppName}`,
+      text: "Si recibes este correo, Resend esta funcionando correctamente.",
+      html: `
+        <div style="font-family:Arial,Helvetica,sans-serif;padding:20px;">
+          <h2>${safeAppName}</h2>
+          <p>Si recibes este correo, <strong>Resend esta funcionando correctamente</strong>.</p>
+        </div>
+      `,
     });
+
+    if (result.error) {
+      console.error("testMail Resend error:", result.error);
+      return res.status(500).json({
+        message: "Fallo Resend",
+        error: result.error.message || result.error,
+      });
+    }
 
     return res.status(200).json({
-      message: "Correo de prueba enviado",
-      messageId: info.messageId,
+      message: "Correo de prueba enviado con Resend",
+      provider: "resend",
+      id: result.data?.id,
     });
   } catch (error) {
     console.error("testMail error:", error);
     return res.status(500).json({
-      message: "Fallo SMTP",
+      message: "Fallo Resend",
       error: String(error && error.message ? error.message : error),
     });
   }
@@ -417,11 +400,15 @@ export const verifyCode = async (req, res) => {
     const code = String(req.body?.code || "").trim();
 
     if (!email || !code) {
-      return res.status(400).json({ message: "Correo y codigo son obligatorios" });
+      return res.status(400).json({
+        message: "Correo y codigo son obligatorios",
+      });
     }
 
     if (!/^\d{6}$/.test(code)) {
-      return res.status(400).json({ message: "Codigo invalido" });
+      return res.status(400).json({
+        message: "Codigo invalido",
+      });
     }
 
     await ensurePasswordResetTable();
@@ -432,7 +419,9 @@ export const verifyCode = async (req, res) => {
     );
 
     if (users.length === 0) {
-      return res.status(400).json({ message: "Codigo invalido o expirado" });
+      return res.status(400).json({
+        message: "Codigo invalido o expirado",
+      });
     }
 
     const user = users[0];
@@ -447,31 +436,41 @@ export const verifyCode = async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(400).json({ message: "Codigo invalido o expirado" });
+      return res.status(400).json({
+        message: "Codigo invalido o expirado",
+      });
     }
 
     const record = rows[0];
 
     if (record.usedAt) {
-      return res.status(400).json({ message: "El codigo ya fue utilizado" });
+      return res.status(400).json({
+        message: "El codigo ya fue utilizado",
+      });
     }
 
     if (new Date(record.expiresAt).getTime() < Date.now()) {
-      return res.status(400).json({ message: "El codigo ha expirado" });
+      return res.status(400).json({
+        message: "El codigo ha expirado",
+      });
     }
 
     const resetToken = crypto.randomBytes(32).toString("hex");
     const resetTokenHash = hashResetToken(resetToken);
 
-    await pool.query(
-      "UPDATE password_reset_tokens SET tokenHash = ? WHERE id = ?",
-      [resetTokenHash, record.id]
-    );
+    await pool.query("UPDATE password_reset_tokens SET tokenHash = ? WHERE id = ?", [
+      resetTokenHash,
+      record.id,
+    ]);
 
-    return res.status(200).json({ token: resetToken });
+    return res.status(200).json({
+      token: resetToken,
+    });
   } catch (error) {
     console.error("verifyCode error:", error);
-    return res.status(500).json({ message: "No se pudo verificar el codigo" });
+    return res.status(500).json({
+      message: "No se pudo verificar el codigo",
+    });
   }
 };
 
@@ -526,10 +525,9 @@ export const resetPassword = async (req, res) => {
       resetRecord.idUser,
     ]);
 
-    await pool.query(
-      "UPDATE password_reset_tokens SET usedAt = NOW() WHERE id = ?",
-      [resetRecord.id]
-    );
+    await pool.query("UPDATE password_reset_tokens SET usedAt = NOW() WHERE id = ?", [
+      resetRecord.id,
+    ]);
 
     return res.status(200).json({
       message: "Contrasena actualizada correctamente",
